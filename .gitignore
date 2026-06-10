@@ -1,6 +1,13 @@
 # Generated images from the API server
 generated/
 
+# Saved Hugging Face token (created by start.sh)
+.hf_token
+
+# Background server artifacts (created by start.sh)
+.server.pid
+server.log
+
 # Go CLI build artifacts
 cli/*.exe
 cli/ideogram4-cli

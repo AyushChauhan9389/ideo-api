@@ -1,3 +1,10 @@
+# Generated images from the API server
+generated/
+
+# Go CLI build artifacts
+cli/*.exe
+cli/ideogram4-cli
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

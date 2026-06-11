@@ -32,6 +32,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+# Disable expandable segments unless the user configured the allocator themselves:
+# it requires working NVML, which is blocked on fractional/virtualized GPUs
+# (RunPod, vast.ai, WSL2), crashing the first forward pass with
+# "NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp".
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException

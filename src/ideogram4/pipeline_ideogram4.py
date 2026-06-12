@@ -7,7 +7,6 @@ from posixpath import dirname as _posix_dirname, join as _posix_join
 from typing import Optional, Sequence
 
 import torch
-from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from PIL import Image
 from safetensors.torch import load_file
@@ -29,6 +28,7 @@ from ideogram4.constants import (
 )
 from ideogram4.latent_norm import get_latent_norm
 from ideogram4.modeling_ideogram4 import Ideogram4Config, Ideogram4Transformer
+from ideogram4.offline import resolve_file, resolve_repo
 from ideogram4.quantized_loading import (
   FP8_TEXT_ENCODER_CONFIG_FLAG,
   is_bnb4bit_state_dict,
@@ -58,7 +58,7 @@ def _load_subfolder_state_dict(
   try:
     return _load_sharded_state_dict(repo_id, index_filename)
   except EntryNotFoundError:
-    single_path = hf_hub_download(
+    single_path = resolve_file(
       repo_id=repo_id, filename=f"{prefix}{basename}.safetensors"
     )
     return load_file(single_path)
@@ -116,7 +116,7 @@ def _load_qwen3_vl(
   model_kwargs = {"subfolder": text_encoder_subfolder} if text_encoder_subfolder else {}
   tokenizer = AutoTokenizer.from_pretrained(repo_id, **tokenizer_kwargs)
 
-  cfg_path = hf_hub_download(
+  cfg_path = resolve_file(
     repo_id=repo_id,
     filename=f"{text_encoder_subfolder}/config.json"
     if text_encoder_subfolder
@@ -196,7 +196,7 @@ def _load_sharded_state_dict(
   the index are interpreted relative to that index's directory, matching the
   layout written by ``huggingface_hub.save_torch_state_dict``.
   """
-  index_path = hf_hub_download(repo_id=repo_id, filename=index_filename)
+  index_path = resolve_file(repo_id=repo_id, filename=index_filename)
   with open(index_path) as f:
     index = json.load(f)
   weight_map: dict[str, str] = index["weight_map"]
@@ -206,7 +206,7 @@ def _load_sharded_state_dict(
   state_dict: dict[str, torch.Tensor] = {}
   for shard in shard_filenames:
     shard_repo_path = _posix_join(shard_dir, shard) if shard_dir else shard
-    shard_path = hf_hub_download(repo_id=repo_id, filename=shard_repo_path)
+    shard_path = resolve_file(repo_id=repo_id, filename=shard_repo_path)
     state_dict.update(load_file(shard_path))
   return state_dict
 
@@ -225,7 +225,7 @@ def _load_indexed_or_single_state_dict(
     return _load_sharded_state_dict(repo_id, index_filename)
   except EntryNotFoundError:
     single_filename = index_filename.removesuffix(".index.json")
-    single_path = hf_hub_download(repo_id=repo_id, filename=single_filename)
+    single_path = resolve_file(repo_id=repo_id, filename=single_filename)
     return load_file(single_path)
 
 
@@ -287,14 +287,16 @@ class Ideogram4Pipeline:
     transformer_config = transformer_config or Ideogram4Config()
     device = torch.device(device)
 
+    repo = resolve_repo(config.weights_repo)
+
     conditional_state_dict = _load_indexed_or_single_state_dict(
-      config.weights_repo, config.conditional_index_filename
+      repo, config.conditional_index_filename
     )
     unconditional_state_dict = _load_indexed_or_single_state_dict(
-      config.weights_repo, config.unconditional_index_filename
+      repo, config.unconditional_index_filename
     )
-    autoencoder_weights = hf_hub_download(
-      repo_id=config.weights_repo, filename=config.autoencoder_filename
+    autoencoder_weights = resolve_file(
+      repo_id=repo, filename=config.autoencoder_filename
     )
 
     conditional_transformer = _build_transformer(
@@ -307,7 +309,7 @@ class Ideogram4Pipeline:
     del unconditional_state_dict
 
     text_tokenizer, text_encoder = _load_qwen3_vl(
-      config.weights_repo,
+      repo,
       device,
       dtype,
       tokenizer_subfolder=config.tokenizer_subfolder,

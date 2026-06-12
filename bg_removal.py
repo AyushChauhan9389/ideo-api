@@ -63,8 +63,10 @@ class BiRefNetRemover:
     self.device = device
     # Checkpoints are stored fp16; force fp32 off-CUDA so CPU/MPS still work.
     self.dtype = torch.float16 if device.startswith("cuda") else torch.float32
+    from ideogram4.offline import resolve_repo
+
     self.model = AutoModelForImageSegmentation.from_pretrained(
-      repo, trust_remote_code=True, torch_dtype=self.dtype
+      resolve_repo(repo), trust_remote_code=True, torch_dtype=self.dtype
     )
     self.model.to(device).eval()
     self.transform = transforms.Compose([

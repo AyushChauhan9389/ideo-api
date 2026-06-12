@@ -25,9 +25,11 @@ type generateResponse struct {
 	Prompts          []string `json:"prompts"`
 	ExpandedCaptions []string `json:"expanded_captions"`
 	Images           []struct {
-		Filename    string `json:"filename"`
-		URL         string `json:"url"`
-		PromptIndex int    `json:"prompt_index"`
+		Filename     string `json:"filename"`
+		URL          string `json:"url"`
+		PromptIndex  int    `json:"prompt_index"`
+		NobgFilename string `json:"nobg_filename"`
+		NobgURL      string `json:"nobg_url"`
 	} `json:"images"`
 	RejectedByModeration []any `json:"rejected_by_moderation"`
 	TimingS              struct {
@@ -72,6 +74,10 @@ func cmdGenerate(args []string) error {
 	quant := fs.String("quant", "", "weight quantization: nf4 | fp8 (reloads the server pipeline if changed)")
 	device := fs.String("device", "", "device override, e.g. cuda, cuda:1, cpu, mps")
 	dtype := fs.String("dtype", "", "compute dtype: bfloat16 | float16 | float32")
+
+	// Background removal
+	removeBg := fs.Bool("remove-bg", false, "also produce a transparent-background version of each image (remove_background)")
+	bgModel := fs.String("bg-model", "", "background-removal model: birefnet-hr (default, quality) | birefnet (fast)")
 
 	// Safety
 	hiveTextKey := fs.String("hive-text-key", "", "Hive text moderation key (falls back to the hive_text_key setting)")
@@ -178,6 +184,12 @@ func cmdGenerate(args []string) error {
 	if visited["dtype"] {
 		body["dtype"] = *dtype
 	}
+	if visited["remove-bg"] {
+		body["remove_background"] = *removeBg
+	}
+	if visited["bg-model"] {
+		body["bg_model"] = *bgModel
+	}
 	if key := firstNonEmpty(*hiveTextKey, settings["hive_text_key"]); key != "" {
 		body["hive_text_key"] = key
 	}
@@ -212,6 +224,9 @@ func cmdGenerate(args []string) error {
 	fmt.Printf("timing:  model_load=%.1fs generation=%.1fs\n", resp.TimingS.ModelLoad, resp.TimingS.Generation)
 	for _, img := range resp.Images {
 		fmt.Printf("image:   %s  (%s%s)\n", img.Filename, client.base, img.URL)
+		if img.NobgURL != "" {
+			fmt.Printf("no-bg:   %s  (%s%s)\n", img.NobgFilename, client.base, img.NobgURL)
+		}
 	}
 	if len(resp.RejectedByModeration) > 0 {
 		fmt.Printf("rejected by moderation: %d image(s)\n", len(resp.RejectedByModeration))
@@ -228,6 +243,13 @@ func cmdGenerate(args []string) error {
 				return err
 			}
 			fmt.Printf("saved:   %s\n", dest)
+			if img.NobgURL != "" {
+				nobgDest := filepath.Join(dir, img.NobgFilename)
+				if err := client.downloadFile(img.NobgURL, nobgDest); err != nil {
+					return err
+				}
+				fmt.Printf("saved:   %s\n", nobgDest)
+			}
 		}
 	}
 	return nil

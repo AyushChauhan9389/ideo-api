@@ -37,6 +37,14 @@ api = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.30",
 ]
+# Background removal (BiRefNet) for the API's remove_background / /gallery features
+bg = [
+  "torchvision",
+  "opencv-python-headless",
+  "timm",
+  "einops",
+  "kornia",
+]
 
 [tool.mypy]
 

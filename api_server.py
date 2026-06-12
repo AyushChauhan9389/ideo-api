@@ -42,7 +42,9 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from html import escape as html_escape
+from PIL import Image
 from pydantic import BaseModel, Field, field_validator
 
 from ideogram4 import (
@@ -198,6 +200,16 @@ class GenerateRequest(BaseModel):
   )
   moderate_output: bool = Field(
     default=True, description="Screen generated images with Hive visual moderation when a key is available."
+  )
+
+  # Background removal (BiRefNet)
+  remove_background: bool = Field(
+    default=False,
+    description="Also produce a transparent-background version of each image (saved as <name>_nobg.png).",
+  )
+  bg_model: Literal["birefnet-hr", "birefnet"] = Field(
+    default="birefnet-hr",
+    description="Background-removal model: 'birefnet-hr' (2048px, best quality) or 'birefnet' (1024px, faster).",
   )
 
   # Response shape
@@ -416,6 +428,22 @@ def generate(req: GenerateRequest):
     img.save(GENERATED_DIR / filename)
     saved.append({"filename": filename, "url": f"/images/{filename}", "prompt_index": i})
 
+  # 6b. Optional background removal — one transparent PNG per kept image.
+  if req.remove_background and kept:
+    from bg_removal import remove_background as _remove_bg
+
+    with _lock:  # BiRefNet shares the device with the pipeline
+      for entry, (_, img) in zip(saved, kept):
+        try:
+          rgba = _remove_bg(img, req.bg_model, device)
+        except Exception as e:
+          entry["nobg_error"] = str(e)
+          continue
+        nobg_name = Path(entry["filename"]).stem + "_nobg.png"
+        rgba.save(GENERATED_DIR / nobg_name)
+        entry["nobg_filename"] = nobg_name
+        entry["nobg_url"] = f"/images/{nobg_name}"
+
   metadata = {
     "id": generation_id,
     "created_at": created_at,
@@ -512,7 +540,128 @@ def delete_image(filename: str) -> dict[str, Any]:
   sidecar = path.with_suffix(".json")
   if sidecar.exists():
     sidecar.unlink()
+  nobg = GENERATED_DIR / (path.stem + "_nobg.png")
+  if nobg.exists():
+    nobg.unlink()
   return {"deleted": filename}
+
+
+@app.post("/images/{filename}/remove-background")
+def remove_image_background(
+  filename: str, model: Literal["birefnet-hr", "birefnet"] = "birefnet-hr"
+) -> dict[str, Any]:
+  """Create (or overwrite) a transparent-background version of an existing image."""
+  path = _resolve_generated(filename)
+  if path.stem.endswith("_nobg"):
+    raise HTTPException(status_code=400, detail="image is already a background-removed output")
+
+  from bg_removal import remove_background as _remove_bg
+
+  device = _pipeline_key[1] if _pipeline_key else SERVER_DEFAULTS["device"]
+  with _lock:
+    try:
+      rgba = _remove_bg(Image.open(path), model, device)
+    except RuntimeError as e:
+      raise HTTPException(status_code=500, detail=str(e))
+  nobg_name = path.stem + "_nobg.png"
+  rgba.save(GENERATED_DIR / nobg_name)
+  return {
+    "filename": filename,
+    "nobg_filename": nobg_name,
+    "nobg_url": f"/images/{nobg_name}",
+    "bg_model": model,
+  }
+
+
+_CHECKER_CSS = (
+  "background-image:linear-gradient(45deg,#ccc 25%,transparent 25%),"
+  "linear-gradient(-45deg,#ccc 25%,transparent 25%),"
+  "linear-gradient(45deg,transparent 75%,#ccc 75%),"
+  "linear-gradient(-45deg,transparent 75%,#ccc 75%);"
+  "background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0;"
+  "background-color:#fff;"
+)
+
+
+@app.get("/gallery", response_class=HTMLResponse)
+def gallery() -> str:
+  """Static page: every generated image next to its background-removed version."""
+  GENERATED_DIR.mkdir(exist_ok=True)
+  originals = sorted(
+    (p for p in GENERATED_DIR.glob("*.png") if not p.stem.endswith("_nobg")),
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+  )
+  cards = []
+  for p in originals:
+    sidecar = p.with_suffix(".json")
+    prompt = seed = ""
+    if sidecar.exists():
+      try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        prompts = meta.get("prompts") or []
+        prompt = (prompts[0] if prompts else "")[:160]
+        seed = meta.get("seed", "")
+      except json.JSONDecodeError:
+        pass
+    nobg = GENERATED_DIR / (p.stem + "_nobg.png")
+    if nobg.exists():
+      nobg_html = (
+        f'<div class="checker"><img src="/images/{nobg.name}" loading="lazy"></div>'
+        f'<div class="cap">{nobg.name}</div>'
+      )
+    else:
+      nobg_html = (
+        f'<div class="missing">no transparent version yet<br>'
+        f'<button onclick="removeBg(this, \'{p.name}\')">remove background</button></div>'
+      )
+    cards.append(f"""
+    <div class="card">
+      <div class="pair">
+        <div><img src="/images/{p.name}" loading="lazy"><div class="cap">{p.name}</div></div>
+        <div>{nobg_html}</div>
+      </div>
+      <div class="meta">{html_escape(prompt)}{f" &middot; seed {seed}" if seed != "" else ""}</div>
+    </div>""")
+
+  body = "".join(cards) or "<p>No generated images yet. POST /generate to create some.</p>"
+  return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Ideogram 4 — gallery</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 24px; background: #f5f5f5; }}
+  h1 {{ font-size: 20px; }}
+  .toolbar {{ margin-bottom: 16px; color: #444; font-size: 14px; }}
+  .card {{ background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 18px;
+           box-shadow: 0 1px 4px rgba(0,0,0,.08); display: inline-block; margin-right: 14px;
+           vertical-align: top; }}
+  .pair {{ display: flex; gap: 12px; }}
+  .pair img {{ max-width: 320px; max-height: 320px; display: block; }}
+  .checker {{ {_CHECKER_CSS} }}
+  .cap {{ font-size: 11px; color: #777; margin-top: 4px; max-width: 320px; word-break: break-all; }}
+  .meta {{ font-size: 12px; color: #444; margin-top: 8px; max-width: 660px; }}
+  .missing {{ display: flex; flex-direction: column; gap: 8px; align-items: center;
+              justify-content: center; min-width: 200px; min-height: 200px;
+              color: #999; font-size: 13px; text-align: center; }}
+  button {{ cursor: pointer; padding: 6px 10px; }}
+</style></head><body>
+<h1>Ideogram 4 — generated images</h1>
+<div class="toolbar">bg model for on-demand removal:
+  <select id="bgmodel"><option value="birefnet-hr" selected>birefnet-hr (quality)</option>
+  <option value="birefnet">birefnet (fast)</option></select>
+</div>
+{body}
+<script>
+async function removeBg(btn, filename) {{
+  btn.disabled = true; btn.textContent = "processing...";
+  const model = document.getElementById("bgmodel").value;
+  try {{
+    const r = await fetch(`/images/${{filename}}/remove-background?model=${{model}}`, {{ method: "POST" }});
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    location.reload();
+  }} catch (e) {{ btn.disabled = false; btn.textContent = "failed: " + e.message; }}
+}}
+</script>
+</body></html>"""
 
 
 # --------------------------------------------------------------------------- #
